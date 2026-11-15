@@ -13,8 +13,9 @@ const els = {
   skipFull: $('skipFull'), ignoreHF: $('ignoreHF'),
   device: $('device'), customDims: $('customDims'), cw: $('cw'), ch: $('ch'),
   gray: $('gray'), qual: $('qual'), title: $('title'), author: $('author'),
-  prev: $('prev'), next: $('next'), pageLabel: $('pageLabel'), showCropped: $('showCropped'),
-  pv: $('pv'), cropInfo: $('cropInfo'),
+  prev: $('prev'), next: $('next'), pageLabel: $('pageLabel'),
+  stage: $('stage'), pv: $('pv'), cropbox: $('cropbox'), cropInfo: $('cropInfo'),
+  resetPage: $('resetPage'), applyAll: $('applyAll'), toggleResult: $('toggleResult'), resetAll: $('resetAll'),
   progress: $('progress'), bar: $('bar'), status: $('status'),
 };
 
@@ -22,20 +23,22 @@ const state = {
   bytes: null,        // Uint8Array of the original PDF (kept pristine for pdf-lib)
   doc: null,          // pdf.js document
   baseName: 'book',
-  pages: [],          // per page: { w, h, view, rotate, map, mw, mh }
+  pages: [],          // per page: { w, h, view, rotate, map, mw, mh, bg }
   boxes: [],          // per page detected content box (fractions) or null
-  full: [],           // per page: content fills the whole page
-  crops: [],          // per page final crop (fractions) {l,t,r,b}
+  full: [],           // per page: full-bleed (cover / full-page image)
+  auto: [],           // per page automatic crop (fractions) {l,t,r,b}
+  overrides: {},      // page index -> manual crop (fractions)
+  crops: [],          // per page final crop = override || auto
   current: 0,
   previewCache: null, // { index, canvas }
+  showResult: false,
   busy: false,
 };
 
 // ---------------------------------------------------------------- loading
 
 els.pick.addEventListener('click', () => els.file.click());
-els.drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); els.file.click(); } });
-els.file.addEventListener('change', () => { if (els.file.files[0]) loadFile(els.file.files[0]); });
+els.file.addEventListener('change', () => { if (els.file.files[0]) loadFile(els.file.files[0]); els.file.value = ''; });
 ['dragenter', 'dragover'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); els.drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); if (t === 'drop' || e.target === els.drop) els.drop.classList.remove('over'); }));
 document.addEventListener('drop', (e) => {
@@ -63,17 +66,21 @@ async function loadFile(file) {
 
     showProgress(true);
     state.pages = [];
-    // Smaller analysis maps for long documents to bound memory use.
-    const longSide = n > 600 ? 300 : 400;
+    const longSide = n > 600 ? 300 : 400; // smaller maps for long documents
     for (let i = 0; i < n; i++) {
       setProgress(i / n, `Analysing page ${i + 1} of ${n}`);
       state.pages.push(await analysePage(i, longSide));
     }
     showProgress(false);
-    els.fileinfo.textContent = `${file.name} — ${n} page${n === 1 ? '' : 's'}, ${(file.size / 1048576).toFixed(1)} MB`;
+    els.fileinfo.textContent = `${file.name} · ${n} page${n === 1 ? '' : 's'}`;
+    els.pick.textContent = 'Change PDF';
+    els.drop.classList.add('compact');
     els.workspace.hidden = false;
     state.current = 0;
+    state.overrides = {};
     state.previewCache = null;
+    state.showResult = false;
+    imageCache = null;
     recompute();
   } catch (err) {
     console.error(err);
@@ -157,16 +164,19 @@ function detectBox(p, s) {
   let top = -1, bot = -1;
   for (let y = y0; y < y1; y++) if (rowOk[y]) { if (top < 0) top = y; bot = y + 1; }
   if (top < 0) return { box: null, full: false };
+  if (s.ignoreHF) [top, bot] = stripEdgeBlocks(rowOk, top, bot, H, 0.06, 0.15);
 
-  if (s.ignoreHF) [top, bot] = stripHeaderFooter(rowOk, top, bot, H);
-
-  let left = -1, right = -1;
+  const colOk = new Uint8Array(W);
   for (let x = x0; x < x1; x++) {
     let c = 0;
     for (let y = top; y < bot; y++) if (map[y * W + x] > thr) { if (++c >= minCount) break; }
-    if (c >= minCount) { if (left < 0) left = x; right = x + 1; }
+    colOk[x] = c >= minCount ? 1 : 0;
   }
+  let left = -1, right = -1;
+  for (let x = x0; x < x1; x++) if (colOk[x]) { if (left < 0) left = x; right = x + 1; }
   if (left < 0) return { box: null, full: false };
+  // Side stamps (e.g. arXiv identifiers), line numbers and stray marginal marks.
+  [left, right] = stripEdgeBlocks(colOk, left, right, W, 0.05, 0.15);
 
   const box = { l: left / W, t: top / H, r: right / W, b: bot / H };
   const spanW = (x1 - x0) / W, spanH = (y1 - y0) / H;
@@ -174,26 +184,36 @@ function detectBox(p, s) {
   return { box, full };
 }
 
-// Drop a thin block of rows at the very top/bottom that is separated from the
-// body by a clear gap (running heads, page numbers).
-function stripHeaderFooter(rowOk, top, bot, H) {
+// Given a 1-D "has ink" profile, drop a thin block at either end that is
+// separated from the body by a clear gap (running heads, page numbers, stamps).
+function stripEdgeBlocks(ok, start0, end0, size, maxThick, zone) {
   const blocks = [];
-  const gapMin = Math.max(3, Math.round(H * 0.012));
-  let start = -1, lastInk = -1;
-  for (let y = top; y < bot; y++) {
-    if (rowOk[y]) {
-      if (start < 0) start = y;
-      else if (y - lastInk > gapMin) { blocks.push([start, lastInk + 1]); start = y; }
-      lastInk = y;
-    }
+  const gapMin = Math.max(3, Math.round(size * 0.012));
+  let start = -1, last = -1;
+  for (let i = start0; i < end0; i++) {
+    if (!ok[i]) continue;
+    if (start < 0) start = i;
+    else if (i - last > gapMin) { blocks.push([start, last + 1]); start = i; }
+    last = i;
   }
-  if (start >= 0) blocks.push([start, lastInk + 1]);
-  if (blocks.length < 2) return [top, bot];
-  const small = (b) => b[1] - b[0] <= H * 0.06;
-  let first = 0, last = blocks.length - 1;
-  if (small(blocks[first]) && blocks[first][1] <= H * 0.15 && blocks[first + 1][0] - blocks[first][1] >= gapMin * 1.5) first++;
-  if (last > first && small(blocks[last]) && blocks[last][0] >= H * 0.85 && blocks[last][0] - blocks[last - 1][1] >= gapMin * 1.5) last--;
-  return [blocks[first][0], blocks[last][1]];
+  if (start >= 0) blocks.push([start, last + 1]);
+  if (blocks.length < 2) return [start0, end0];
+  const thin = (b) => b[1] - b[0] <= size * maxThick;
+  let a = 0, z = blocks.length - 1;
+  if (thin(blocks[a]) && blocks[a][1] <= size * zone && blocks[a + 1][0] - blocks[a][1] >= gapMin * 1.5) a++;
+  if (z > a && thin(blocks[z]) && blocks[z][0] >= size * (1 - zone) && blocks[z][0] - blocks[z - 1][1] >= gapMin * 1.5) z--;
+  return [blocks[a][0], blocks[z][1]];
+}
+
+const FULL = Object.freeze({ l: 0, t: 0, r: 1, b: 1 });
+const unionBox = (a, b) => (!a ? { ...b } : !b ? { ...a } : { l: Math.min(a.l, b.l), t: Math.min(a.t, b.t), r: Math.max(a.r, b.r), b: Math.max(a.b, b.b) });
+const median = (arr) => { const s = [...arr].sort((x, y) => x - y); return s[s.length >> 1]; };
+
+// Pages share a crop only with pages of the same size/orientation (and parity
+// in odd/even mode), so mixed-size documents don't get a nonsense union.
+function groupOf(i, s) {
+  const p = state.pages[i];
+  return `${s.mode === 'oddeven' ? i % 2 : 0}:${Math.round(p.w / 4)}x${Math.round(p.h / 4)}`;
 }
 
 function recompute() {
@@ -208,46 +228,49 @@ function recompute() {
   }
   // A page whose background differs from the document's usual paper tone
   // (e.g. a coloured cover or full-page photo) counts as full-bleed too.
-  const bgs = state.pages.map((p) => p.bg).sort((a, b) => a - b);
-  const paper = bgs[bgs.length >> 1];
+  const paper = median(state.pages.map((p) => p.bg));
   for (let i = 0; i < n; i++) if (Math.abs(state.pages[i].bg - paper) > s.sens) state.full[i] = true;
-  const FULL = { l: 0, t: 0, r: 1, b: 1 };
-  const union = (idxs) => {
-    let u = null;
-    for (const i of idxs) {
-      const b = state.boxes[i];
-      if (!b || (s.skipFull && state.full[i])) continue;
-      u = u ? { l: Math.min(u.l, b.l), t: Math.min(u.t, b.t), r: Math.max(u.r, b.r), b: Math.max(u.b, b.b) } : { ...b };
-    }
-    return u;
-  };
-  // Pages share a crop only with pages of the same size/orientation (and parity
-  // in odd/even mode), so mixed-size documents don't get a nonsense union.
-  const groupOf = (i) => {
-    const p = state.pages[i];
-    return `${s.mode === 'oddeven' ? i % 2 : 0}:${Math.round(p.w / 4)}x${Math.round(p.h / 4)}`;
-  };
+
+  const eligible = (i) => state.boxes[i] && !(s.skipFull && state.full[i]);
   const groupBox = {};
   if (s.mode !== 'perpage') {
     const members = {};
-    for (let i = 0; i < n; i++) (members[groupOf(i)] ||= []).push(i);
-    for (const g in members) groupBox[g] = union(members[g]);
+    for (let i = 0; i < n; i++) if (eligible(i)) (members[groupOf(i, s)] ||= []).push(i);
+    for (const g in members) {
+      const idx = members[g];
+      const bs = idx.map((i) => state.boxes[i]);
+      // Pages that stick out well past the typical page (a wide figure, a
+      // stamp on the first page) don't widen the shared crop; they get their
+      // own wider crop below instead.
+      let core = bs;
+      if (bs.length >= 3) {
+        const m = { l: median(bs.map((b) => b.l)), t: median(bs.map((b) => b.t)), r: median(bs.map((b) => b.r)), b: median(bs.map((b) => b.b)) };
+        const tol = 0.05;
+        const inl = bs.filter((b) => b.l >= m.l - tol && b.t >= m.t - tol && b.r <= m.r + tol && b.b <= m.b + tol);
+        if (inl.length) core = inl;
+      }
+      groupBox[g] = core.reduce((u, b) => unionBox(u, b), null);
+    }
   }
-  state.crops = state.boxes.map((b, i) => {
-    let c;
-    if (s.skipFull && state.full[i]) c = FULL;
-    else if (s.mode === 'perpage') c = b || FULL;
-    else c = groupBox[groupOf(i)] || b || FULL;
-    if (c === FULL) return { ...FULL };
+  state.auto = state.boxes.map((b, i) => {
+    if (s.skipFull && state.full[i]) return { ...FULL };
+    let c = b;
+    if (s.mode !== 'perpage') {
+      const g = groupBox[groupOf(i, s)];
+      c = g ? unionBox(g, b) : b; // never cut a page's own content
+    }
+    if (!c) return { ...FULL };
     const p = state.pages[i];
     // Equal absolute padding on all sides, relative to the shorter page side.
     const padPts = s.pad * Math.min(p.w, p.h);
     const px = padPts / p.w, py = padPts / p.h;
-    return {
-      l: Math.max(0, c.l - px), t: Math.max(0, c.t - py),
-      r: Math.min(1, c.r + px), b: Math.min(1, c.b + py),
-    };
+    return { l: Math.max(0, c.l - px), t: Math.max(0, c.t - py), r: Math.min(1, c.r + px), b: Math.min(1, c.b + py) };
   });
+  applyOverrides();
+}
+
+function applyOverrides() {
+  state.crops = state.auto.map((a, i) => state.overrides[i] || a);
   drawPreview();
 }
 
@@ -257,15 +280,15 @@ async function drawPreview() {
   const i = state.current;
   const n = state.pages.length;
   if (!n) return;
-  els.pageLabel.textContent = `Page ${i + 1} of ${n}`;
+  els.pageLabel.textContent = `Page ${i + 1} / ${n}`;
   els.prev.disabled = i === 0;
   els.next.disabled = i === n - 1;
 
   if (!state.previewCache || state.previewCache.index !== i) {
     const page = await state.doc.getPage(i + 1);
     const vp1 = page.getViewport({ scale: 1 });
-    const scale = Math.min(2.5, 1100 / Math.max(vp1.width, vp1.height)) * Math.min(2, window.devicePixelRatio || 1) / 1.2;
-    const vp = page.getViewport({ scale });
+    const target = 1000 * Math.min(2, window.devicePixelRatio || 1) / 1.25;
+    const vp = page.getViewport({ scale: target / Math.max(vp1.width, vp1.height) });
     const c = document.createElement('canvas');
     c.width = Math.round(vp.width); c.height = Math.round(vp.height);
     const ctx = c.getContext('2d');
@@ -277,35 +300,99 @@ async function drawPreview() {
   const src = state.previewCache.canvas;
   const crop = state.crops[i];
   const W = src.width, H = src.height;
-  const cx = crop.l * W, cy = crop.t * H, cw = (crop.r - crop.l) * W, chh = (crop.b - crop.t) * H;
   const out = els.pv, ctx = out.getContext('2d');
-  if (els.showCropped.checked) {
+  els.stage.classList.toggle('result', state.showResult);
+  if (state.showResult) {
+    const cx = crop.l * W, cy = crop.t * H, cw = (crop.r - crop.l) * W, chh = (crop.b - crop.t) * H;
     out.width = Math.max(1, Math.round(cw)); out.height = Math.max(1, Math.round(chh));
     ctx.drawImage(src, cx, cy, cw, chh, 0, 0, out.width, out.height);
   } else {
-    out.width = W; out.height = H;
+    if (out.width !== W || out.height !== H) { out.width = W; out.height = H; }
     ctx.drawImage(src, 0, 0);
-    const css = getComputedStyle(document.documentElement);
-    ctx.fillStyle = css.getPropertyValue('--shade').trim() || 'rgba(200,40,40,.28)';
-    ctx.beginPath();
-    ctx.rect(0, 0, W, H);
-    ctx.rect(cx, cy, cw, chh);
-    ctx.fill('evenodd');
-    ctx.strokeStyle = css.getPropertyValue('--line').trim() || '#c62828';
-    ctx.lineWidth = Math.max(1, W / 400);
-    ctx.strokeRect(cx, cy, cw, chh);
   }
-  const s = settings();
-  const p = state.pages[i];
-  const [ow, oh] = outputSize(p, crop, s);
-  const pct = (v) => `${(v * 100).toFixed(1)}%`;
-  let note = '';
-  if (s.skipFull && state.full[i]) note = ' (full-bleed page, not cropped)';
-  else if (!state.boxes[i]) note = ' (blank page)';
-  els.cropInfo.textContent =
-    `Trimmed: left ${pct(crop.l)}, right ${pct(1 - crop.r)}, top ${pct(crop.t)}, bottom ${pct(1 - crop.b)}${note}. ` +
-    `E-reader image: ${ow}×${oh}px.`;
+  positionCropbox();
+  updateInfo();
 }
+
+function positionCropbox() {
+  const c = state.crops[state.current];
+  if (!c) return;
+  const b = els.cropbox.style;
+  b.left = `${c.l * 100}%`; b.top = `${c.t * 100}%`;
+  b.width = `${(c.r - c.l) * 100}%`; b.height = `${(c.b - c.t) * 100}%`;
+  els.cropbox.classList.toggle('manual', !!state.overrides[state.current]);
+}
+
+function updateInfo() {
+  const i = state.current;
+  const s = settings();
+  const manual = !!state.overrides[i];
+  const [ow, oh] = outputSize(state.pages[i], state.crops[i], s);
+  let what = manual ? 'Manual crop' : 'Auto crop';
+  if (!manual && s.skipFull && state.full[i]) what = 'Cover / full-page image, not cropped';
+  else if (!manual && !state.boxes[i]) what = 'Blank page';
+  els.cropInfo.textContent = state.showResult
+    ? `${what} · ${ow}×${oh}px on your e-reader`
+    : `${what} · drag the box to adjust`;
+  els.resetPage.disabled = !manual;
+  const mode = s.mode;
+  els.applyAll.textContent = mode === 'oddeven' ? `Use on all ${(i + 1) % 2 ? 'odd' : 'even'} pages` : 'Use on all pages';
+  els.resetAll.disabled = !Object.keys(state.overrides).length;
+}
+
+// Drag handles / move the crop box (mouse + touch via pointer events).
+let drag = null;
+els.cropbox.addEventListener('pointerdown', (e) => {
+  const h = e.target.dataset.h || 'move';
+  const rect = els.stage.getBoundingClientRect();
+  drag = { h, id: e.pointerId, x: e.clientX, y: e.clientY, w: rect.width, hgt: rect.height, start: { ...state.crops[state.current] } };
+  els.cropbox.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+els.cropbox.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const dx = (e.clientX - drag.x) / drag.w, dy = (e.clientY - drag.y) / drag.hgt;
+  const s0 = drag.start, MIN = 0.05;
+  const c = { ...s0 };
+  const h = drag.h;
+  if (h === 'move') {
+    const w = s0.r - s0.l, hh = s0.b - s0.t;
+    c.l = Math.min(Math.max(0, s0.l + dx), 1 - w); c.r = c.l + w;
+    c.t = Math.min(Math.max(0, s0.t + dy), 1 - hh); c.b = c.t + hh;
+  } else {
+    if (h.includes('w')) c.l = Math.min(Math.max(0, s0.l + dx), s0.r - MIN);
+    if (h.includes('e')) c.r = Math.max(Math.min(1, s0.r + dx), s0.l + MIN);
+    if (h.includes('n')) c.t = Math.min(Math.max(0, s0.t + dy), s0.b - MIN);
+    if (h.includes('s')) c.b = Math.max(Math.min(1, s0.b + dy), s0.t + MIN);
+  }
+  state.overrides[state.current] = c;
+  state.crops[state.current] = c;
+  positionCropbox();
+});
+const endDrag = (e) => { if (drag && e.pointerId === drag.id) { drag = null; updateInfo(); } };
+els.cropbox.addEventListener('pointerup', endDrag);
+els.cropbox.addEventListener('pointercancel', endDrag);
+
+els.resetPage.addEventListener('click', () => { delete state.overrides[state.current]; applyOverrides(); });
+els.resetAll.addEventListener('click', () => { state.overrides = {}; applyOverrides(); });
+els.applyAll.addEventListener('click', () => {
+  const s = settings();
+  const i = state.current;
+  const c = { ...state.crops[i] };
+  const g = groupOf(i, s);
+  for (let j = 0; j < state.pages.length; j++) {
+    if (s.mode === 'oddeven' && j % 2 !== i % 2) continue;
+    if (groupOf(j, s).split(':')[1] !== g.split(':')[1]) continue; // same page size only
+    state.overrides[j] = { ...c };
+  }
+  applyOverrides();
+});
+els.toggleResult.addEventListener('click', () => {
+  state.showResult = !state.showResult;
+  els.toggleResult.setAttribute('aria-pressed', String(state.showResult));
+  els.toggleResult.textContent = state.showResult ? 'Edit crop' : 'Show result';
+  drawPreview();
+});
 
 els.prev.addEventListener('click', () => { if (state.current > 0) { state.current--; drawPreview(); } });
 els.next.addEventListener('click', () => { if (state.current < state.pages.length - 1) { state.current++; drawPreview(); } });
@@ -314,10 +401,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') els.prev.click();
   if (e.key === 'ArrowRight') els.next.click();
 });
-els.showCropped.addEventListener('change', drawPreview);
 
-const outputs = [['padding', 'paddingOut'], ['sens', 'sensOut'], ['edge', 'edgeOut'], ['qual', 'qualOut']];
-for (const [inp, out] of outputs) {
+for (const [inp, out] of [['padding', 'paddingOut'], ['sens', 'sensOut'], ['edge', 'edgeOut'], ['qual', 'qualOut']]) {
   els[inp].addEventListener('input', () => { $(out).textContent = els[inp].value; });
 }
 let rcTimer = 0;
@@ -326,8 +411,8 @@ for (const id of ['mode', 'padding', 'sens', 'edge', 'skipFull', 'ignoreHF']) {
   els[id].addEventListener('input', scheduleRecompute);
   els[id].addEventListener('change', scheduleRecompute);
 }
-els.device.addEventListener('change', () => { els.customDims.hidden = els.device.value !== 'custom'; drawPreview(); });
-for (const id of ['cw', 'ch']) els[id].addEventListener('input', () => drawPreview());
+els.device.addEventListener('change', () => { els.customDims.hidden = els.device.value !== 'custom'; if (state.pages.length) updateInfo(); });
+for (const id of ['cw', 'ch']) els[id].addEventListener('input', () => state.pages.length && updateInfo());
 
 // ---------------------------------------------------------------- output
 
@@ -587,7 +672,7 @@ let imageCache = null; // { key, images } so EPUB/KEPUB/CBZ don't re-render each
 async function generate(fmt) {
   if (state.busy || !state.pages.length) return;
   state.busy = true;
-  const buttons = document.querySelectorAll('#downloads button[data-fmt]');
+  const buttons = document.querySelectorAll('button[data-fmt]');
   buttons.forEach((b) => (b.disabled = true));
   showProgress(true);
   try {
@@ -606,16 +691,17 @@ async function generate(fmt) {
   } catch (err) {
     console.error(err);
     setProgress(0, `Failed: ${err.message || err}`);
+    setTimeout(() => showProgress(false), 6000);
   } finally {
     state.busy = false;
     buttons.forEach((b) => (b.disabled = false));
   }
 }
 
-document.querySelectorAll('#downloads button[data-fmt]').forEach((b) => b.addEventListener('click', () => generate(b.dataset.fmt)));
+document.querySelectorAll('button[data-fmt]').forEach((b) => b.addEventListener('click', () => generate(b.dataset.fmt)));
 
 function showProgress(on) { els.progress.hidden = !on; if (on) setProgress(0, ''); }
 function setProgress(frac, text) { els.bar.value = Math.max(0, Math.min(1, frac)); els.status.textContent = text; }
 
 // Expose for automated tests.
-window.__pdfcut = { state, settings, recompute, generate, buildEpub, buildCroppedPdf, renderAllImages };
+window.__pdfcut = { state, settings, recompute, generate };

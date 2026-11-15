@@ -12,9 +12,10 @@ All processing happens in the browser. The PDF never leaves your computer.
 ## How it works
 
 1. Each page is rendered at low resolution with [pdf.js](https://mozilla.github.io/pdf.js/). Pixels that differ from the page's background tone count as content.
-2. A crop box is computed per page, per odd/even page, or once for the whole document. Pages of different sizes are grouped separately. Covers and full-page images can be left uncropped. Running headers, footers and page numbers can optionally be dropped.
-3. For EPUB, KEPUB and CBZ, each cropped page is rendered at the chosen device resolution and saved as a JPEG. The JPEGs are packaged with [JSZip](https://stuk.github.io/jszip/).
-4. For the cropped PDF, [pdf-lib](https://pdf-lib.js.org/) rewrites each page's MediaBox and CropBox, so no re-rendering happens.
+2. Thin side strips such as arXiv stamps are ignored. A crop box is computed per page, per odd/even page, or once for the whole document. Pages of different sizes are grouped separately. Covers and full-page images can be left uncropped. Running headers, footers and page numbers can optionally be dropped. Pages whose content sticks out (a wide figure, say) get their own wider crop instead of widening every page.
+3. You can drag the crop box on any page to adjust it (mouse or touch), then reset it or reuse it on all odd, even or all pages.
+4. For EPUB, KEPUB and CBZ, each cropped page is rendered at the chosen device resolution and saved as a JPEG. The JPEGs are packaged with [JSZip](https://stuk.github.io/jszip/).
+5. For the cropped PDF, [pdf-lib](https://pdf-lib.js.org/) rewrites each page's MediaBox and CropBox, so no re-rendering happens.
 
 ## Hosting on GitHub Pages
 
