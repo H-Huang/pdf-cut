@@ -7,18 +7,21 @@
   --accent: #2f6f4f;
   --accent-text: #ffffff;
   --btn: #efeee9;
+  --btn-hover: #e2efe7;
+  --accent-hover: #245a3f;
+  --ring: rgba(47, 111, 79, .25);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #161617; --panel: #1f1f21; --text: #ececec; --muted: #9a9aa0;
-    --border: #36363a; --accent: #5fb68a; --accent-text: #0d1a13; --btn: #2a2a2d;
+    --border: #36363a; --accent: #5fb68a; --accent-text: #0d1a13; --btn: #2a2a2d; --btn-hover: #24372d; --accent-hover: #9be3bb; --ring: rgba(95, 182, 138, .35);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #161617; --panel: #1f1f21; --text: #ececec; --muted: #9a9aa0;
-  --border: #36363a; --accent: #5fb68a; --accent-text: #0d1a13; --btn: #2a2a2d;
+  --border: #36363a; --accent: #5fb68a; --accent-text: #0d1a13; --btn: #2a2a2d; --btn-hover: #24372d; --accent-hover: #9be3bb; --ring: rgba(95, 182, 138, .35);
   color-scheme: dark;
 }
 
@@ -46,7 +49,23 @@ button {
   padding: 10px 14px; min-height: 44px; cursor: pointer;
   touch-action: manipulation;
 }
+button { transition: background-color .15s, border-color .15s, box-shadow .15s, transform .08s; }
+@media (hover: hover) {
+  button:not(:disabled):hover { background: var(--btn-hover); border-color: var(--accent); }
+  button.primary:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: 0 0 0 4px var(--ring), 0 6px 18px rgba(0,0,0,.25); transform: translateY(-1px); }
+  button:not(.primary):not(:disabled):hover { box-shadow: 0 0 0 3px var(--ring); }
+}
+button:not(:disabled):active { transform: scale(.97); }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 button:disabled { opacity: .45; cursor: default; }
+.ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; vertical-align: -3px; margin-right: 6px; flex: none; }
+button.dl { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.dl-main { display: flex; align-items: center; }
+.dl-sub { font-size: 12px; font-weight: 400; opacity: .85; margin-top: 2px; }
+.formats .dl { flex-direction: row; flex-wrap: wrap; }
+.formats .dl span { flex-basis: 100%; text-align: center; }
+.formats .ico { width: 15px; height: 15px; margin-right: 4px; vertical-align: -2px; }
+.or { margin: 12px 0 0; text-align: center; }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
 button.big { font-size: 17px; padding: 14px 22px; }
 button.wide { width: 100%; }

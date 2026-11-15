@@ -54,7 +54,7 @@
         <section class="card" id="downloads">
           <label>E-reader
             <select id="device">
-              <option value="1072x1448" selected>Kobo Clara 2E / BW / Colour (1072×1448)</option>
+              <option value="1072x1448" selected>Kobo Clara 2E (1072×1448)</option>
               <option value="1264x1680">Kobo Libra (1264×1680)</option>
               <option value="1440x1920">Kobo Sage (1440×1920)</option>
               <option value="1404x1872">Kobo Elipsa (1404×1872)</option>
@@ -71,18 +71,22 @@
             <label>Width <input type="number" id="cw" value="1264" min="200" max="4000" inputmode="numeric"></label>
             <label>Height <input type="number" id="ch" value="1680" min="200" max="4000" inputmode="numeric"></label>
           </div>
-          <button type="button" class="primary big wide" data-fmt="epub">Download EPUB</button>
+          <button type="button" class="primary big wide dl" data-fmt="kepub">
+            <span class="dl-main"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>Download for Kobo</span>
+            <span class="dl-sub">.kepub.epub</span>
+          </button>
+          <p class="small muted or">Other formats</p>
           <div class="formats">
-            <button type="button" data-fmt="kepub">Kobo<span>.kepub.epub</span></button>
-            <button type="button" data-fmt="cbz">CBZ<span>comics</span></button>
-            <button type="button" data-fmt="pdf">PDF<span>cropped</span></button>
+            <button type="button" class="dl" data-fmt="epub"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>EPUB<span>most readers</span></button>
+            <button type="button" class="dl" data-fmt="cbz"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>CBZ<span>comics</span></button>
+            <button type="button" class="dl" data-fmt="pdf"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>PDF<span>cropped</span></button>
           </div>
           <details class="small muted help">
             <summary>Which one?</summary>
             <ul>
-              <li><b>Kobo:</b> use <i>Kobo</i> (or EPUB) and copy it over USB.</li>
+              <li><b>Kobo:</b> use <i>Download for Kobo</i> and copy the file to the reader over USB.</li>
               <li><b>Kindle:</b> send the EPUB with Send to Kindle, or copy the cropped PDF over USB.</li>
-              <li>EPUB, Kobo and CBZ store each page as an image sized for your device. The cropped PDF keeps the original text sharp and searchable.</li>
+              <li>Kobo, EPUB and CBZ files store each page as an image sized for your device. The cropped PDF keeps the original text sharp and searchable.</li>
             </ul>
           </details>
         </section>
