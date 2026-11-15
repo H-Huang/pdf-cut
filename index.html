@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Cut</title>
+  <meta name="description" content="Trim the margins off a PDF and export it for e-readers (EPUB, Kobo KEPUB, CBZ, cropped PDF). Runs entirely in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%223%22 y=%221%22 width=%2210%22 height=%2214%22 rx=%221%22 fill=%22%232f6f4f%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/pdf-lib.min.js"></script>
+  <script src="vendor/jszip.min.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>PDF Cut</h1>
+    <p class="tagline">Trim the margins off a PDF so it fills an e-reader screen, then download it as EPUB, Kobo KEPUB, CBZ or a cropped PDF. Your file stays on your computer: all processing happens in this browser tab.</p>
+  </header>
+
+  <main>
+    <section id="drop" class="drop" tabindex="0">
+      <input type="file" id="file" accept="application/pdf,.pdf" hidden>
+      <p><strong>Drop a PDF here</strong> or <button type="button" id="pick" class="linkish">choose a file</button></p>
+      <p class="muted" id="fileinfo"></p>
+    </section>
+
+    <div id="workspace" hidden>
+      <section class="panel" id="settings">
+        <h2>1. Margin detection</h2>
+        <label>Crop mode
+          <select id="mode">
+            <option value="uniform">Same crop for every page</option>
+            <option value="oddeven" selected>Separate crops for odd and even pages</option>
+            <option value="perpage">Crop each page on its own</option>
+          </select>
+        </label>
+        <label>Padding around content: <output id="paddingOut">1.5</output>%
+          <input type="range" id="padding" min="0" max="10" step="0.5" value="1.5">
+        </label>
+        <label>Sensitivity: <output id="sensOut">40</output>
+          <input type="range" id="sens" min="5" max="120" step="5" value="40">
+          <span class="hint">Lower values treat fainter marks as content. Raise it if scan noise keeps the margins from being trimmed.</span>
+        </label>
+        <label>Ignore page edges: <output id="edgeOut">0</output>%
+          <input type="range" id="edge" min="0" max="10" step="0.5" value="0">
+          <span class="hint">Skips a band around each page edge, which helps with dark borders on scans.</span>
+        </label>
+        <label class="check"><input type="checkbox" id="skipFull" checked> Leave full-bleed pages (covers, full-page images) uncropped</label>
+        <label class="check"><input type="checkbox" id="ignoreHF"> Remove running headers, footers and page numbers</label>
+
+        <h2>2. E-reader output</h2>
+        <label>Device
+          <select id="device">
+            <option value="1072x1448">Kobo Clara / Kindle (basic) — 1072×1448</option>
+            <option value="1264x1680" selected>Kobo Libra — 1264×1680</option>
+            <option value="1440x1920">Kobo Sage — 1440×1920</option>
+            <option value="1404x1872">Kobo Elipsa — 1404×1872</option>
+            <option value="1236x1648">Kindle Paperwhite — 1236×1648</option>
+            <option value="1264x1680k">Kindle Oasis — 1264×1680</option>
+            <option value="1860x2480">Kindle Scribe — 1860×2480</option>
+            <option value="1404x1872r">reMarkable 2 — 1404×1872</option>
+            <option value="1536x2048">Tablet — 1536×2048</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </label>
+        <div id="customDims" class="row" hidden>
+          <label>Width <input type="number" id="cw" value="1264" min="200" max="4000"></label>
+          <label>Height <input type="number" id="ch" value="1680" min="200" max="4000"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="gray" checked> Grayscale (smaller files, for e-ink screens)</label>
+        <label>Image quality: <output id="qualOut">80</output>
+          <input type="range" id="qual" min="40" max="95" step="5" value="80">
+        </label>
+        <label>Title <input type="text" id="title"></label>
+        <label>Author <input type="text" id="author"></label>
+      </section>
+
+      <section class="panel" id="preview">
+        <div class="pv-head">
+          <button type="button" id="prev" aria-label="Previous page">‹</button>
+          <span id="pageLabel">Page 1 of 1</span>
+          <button type="button" id="next" aria-label="Next page">›</button>
+          <label class="check small"><input type="checkbox" id="showCropped"> Show cropped</label>
+        </div>
+        <div class="canvas-wrap"><canvas id="pv"></canvas></div>
+        <p class="muted small" id="cropInfo"></p>
+      </section>
+
+      <section class="panel" id="downloads">
+        <h2>3. Download</h2>
+        <div class="buttons">
+          <button type="button" class="primary" data-fmt="epub">EPUB<span>Kobo, Apple Books, Send to Kindle, most readers</span></button>
+          <button type="button" class="primary" data-fmt="kepub">Kobo KEPUB<span>.kepub.epub, opens in Kobo's own reader</span></button>
+          <button type="button" data-fmt="cbz">CBZ<span>Comic-book archive (Kobo, KOReader)</span></button>
+          <button type="button" data-fmt="pdf">Cropped PDF<span>Keeps sharp, selectable text</span></button>
+        </div>
+        <div id="progress" hidden><progress id="bar" max="1" value="0"></progress> <span id="status"></span></div>
+        <details class="muted small">
+          <summary>Which format should I pick?</summary>
+          <ul>
+            <li><b>Kobo:</b> pick <i>Kobo KEPUB</i> (or plain EPUB) and copy it to the reader over USB. Kobo can also open the cropped PDF.</li>
+            <li><b>Kindle:</b> send the <i>EPUB</i> with Send to Kindle, or copy the <i>cropped PDF</i> over USB.</li>
+            <li><b>Other readers and apps:</b> EPUB works almost everywhere. CBZ suits comic readers and KOReader.</li>
+            <li>EPUB, KEPUB and CBZ store each page as an image sized for your device. The cropped PDF keeps the original vector text, so you can still select and search it.</li>
+          </ul>
+        </details>
+      </section>
+    </div>
+  </main>
+  <footer class="muted small">PDF Cut runs offline in your browser. Built with pdf.js, pdf-lib and JSZip.</footer>
+</body>
+</html>
