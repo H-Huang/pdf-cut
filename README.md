@@ -7,7 +7,7 @@ A static web page that trims the margins off a PDF and exports it for e-readers:
 - **CBZ**: comic-book archive (Kobo, KOReader, comic apps)
 - **Cropped PDF**: the original vector PDF with its page boxes trimmed, so text stays sharp and selectable
 
-All processing happens in the browser. The PDF never leaves your computer.
+You can load several PDFs at once and download them all as one zip. All processing happens in the browser. The PDF never leaves your computer.
 
 ## How it works
 

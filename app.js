@@ -17,84 +17,217 @@ const els = {
   stage: $('stage'), pv: $('pv'), cropbox: $('cropbox'), cropInfo: $('cropInfo'),
   resetPage: $('resetPage'), applyAll: $('applyAll'), toggleResult: $('toggleResult'), resetAll: $('resetAll'),
   progress: $('progress'), bar: $('bar'), status: $('status'),
+  allWrap: $('allWrap'), allFiles: $('allFiles'), allCount: $('allCount'), mainLabel: $('mainLabel'), mainSub: $('mainSub'),
 };
 
 const state = {
+  // Fields of the active document (swapped in/out by activate()):
   bytes: null,        // Uint8Array of the original PDF (kept pristine for pdf-lib)
   doc: null,          // pdf.js document
   baseName: 'book',
   pages: [],          // per page: { w, h, view, rotate, map, mw, mh, bg }
+  overrides: {},      // page index -> manual crop (fractions)
+  current: 0,
+  // Derived for the active document by recompute():
   boxes: [],          // per page detected content box (fractions) or null
   full: [],           // per page: full-bleed (cover / full-page image)
   auto: [],           // per page automatic crop (fractions) {l,t,r,b}
-  overrides: {},      // page index -> manual crop (fractions)
   crops: [],          // per page final crop = override || auto
-  current: 0,
+  // UI:
+  active: null,       // active entry of `docs`
   previewCache: null, // { index, canvas }
   showResult: false,
-  busy: false,
+  busy: false,        // generating output
+  loading: false,     // analysing queued files
 };
+
+// Every loaded file. Each keeps its own pages, manual crops, title and author.
+const docs = [];
+const DOC_FIELDS = ['bytes', 'doc', 'baseName', 'pages', 'overrides', 'current'];
+const queue = [];
+let docSeq = 0;
+
+const isPdf = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
 
 // ---------------------------------------------------------------- loading
 
 els.pick.addEventListener('click', () => els.file.click());
-els.file.addEventListener('change', () => { if (els.file.files[0]) loadFile(els.file.files[0]); els.file.value = ''; });
+els.file.addEventListener('change', () => { addFiles(els.file.files); els.file.value = ''; });
 ['dragenter', 'dragover'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); els.drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); if (t === 'drop' || e.target === els.drop) els.drop.classList.remove('over'); }));
-document.addEventListener('drop', (e) => {
-  const f = [...(e.dataTransfer?.files || [])].find((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
-  if (f) loadFile(f);
-});
+document.addEventListener('drop', (e) => addFiles(e.dataTransfer?.files || []));
 
-async function loadFile(file) {
-  if (state.busy) return;
-  state.busy = true;
-  try {
-    els.fileinfo.textContent = `Loading ${file.name}…`;
-    const buf = new Uint8Array(await file.arrayBuffer());
-    state.bytes = buf;
-    state.baseName = file.name.replace(/\.pdf$/i, '') || 'book';
-    if (state.doc) state.doc.destroy();
-    // pdf.js may transfer the buffer to its worker, so hand it a copy.
-    state.doc = await pdfjsLib.getDocument({ data: buf.slice() }).promise;
-    const n = state.doc.numPages;
-
-    let meta = {};
-    try { meta = (await state.doc.getMetadata()).info || {}; } catch { /* ignore */ }
-    els.title.value = (meta.Title && String(meta.Title).trim()) || state.baseName;
-    els.author.value = (meta.Author && String(meta.Author).trim()) || '';
-
-    showProgress(true);
-    state.pages = [];
-    const longSide = n > 600 ? 300 : 400; // smaller maps for long documents
-    for (let i = 0; i < n; i++) {
-      setProgress(i / n, `Analysing page ${i + 1} of ${n}`);
-      state.pages.push(await analysePage(i, longSide));
-    }
-    showProgress(false);
-    els.fileinfo.textContent = `${file.name} · ${n} page${n === 1 ? '' : 's'}`;
-    els.pick.textContent = 'Change PDF';
-    els.drop.classList.add('compact');
-    els.workspace.hidden = false;
-    state.current = 0;
-    state.overrides = {};
-    state.previewCache = null;
-    state.showResult = false;
-    imageCache = null;
-    recompute();
-  } catch (err) {
-    console.error(err);
-    showProgress(false);
-    els.fileinfo.textContent = `Could not open this PDF: ${err.message || err}`;
-  } finally {
-    state.busy = false;
+function addFiles(files) {
+  const pdfs = [...files].filter(isPdf);
+  if (!pdfs.length) {
+    if (files.length) els.fileinfo.textContent = 'Only PDF files are supported.';
+    return;
   }
+  for (const f of pdfs) {
+    const d = {
+      id: ++docSeq, name: f.name, file: f, status: 'queued', progress: 0, error: '',
+      bytes: null, doc: null, baseName: f.name.replace(/\.pdf$/i, '') || 'book',
+      pages: [], overrides: {}, current: 0, title: '', author: '',
+    };
+    docs.push(d);
+    queue.push(d);
+  }
+  els.fileinfo.textContent = '';
+  els.drop.classList.add('compact');
+  els.pick.textContent = 'Add PDFs';
+  $('dropHint').textContent = 'or drop more here';
+  renderFileList();
+  processQueue();
+}
+
+async function processQueue() {
+  if (state.loading) return;
+  state.loading = true;
+  updateButtons();
+  while (queue.length) {
+    const d = queue.shift();
+    if (!docs.includes(d)) continue; // removed while waiting
+    try {
+      await loadDoc(d);
+      d.status = 'ready';
+    } catch (err) {
+      console.error(err);
+      d.status = 'error';
+      d.error = err.message || String(err);
+    }
+    d.file = null;
+    if (d.status === 'ready' && !state.active && docs.includes(d)) {
+      els.workspace.hidden = false;
+      activate(d);
+    }
+    renderFileList();
+  }
+  state.loading = false;
+  showProgress(false);
+  updateButtons();
+  renderFileList();
+}
+
+async function loadDoc(d) {
+  d.status = 'loading';
+  renderFileList();
+  const buf = new Uint8Array(await d.file.arrayBuffer());
+  d.bytes = buf;
+  // pdf.js may transfer the buffer to its worker, so hand it a copy.
+  d.doc = await pdfjsLib.getDocument({ data: buf.slice() }).promise;
+  let meta = {};
+  try { meta = (await d.doc.getMetadata()).info || {}; } catch { /* ignore */ }
+  d.title = (meta.Title && String(meta.Title).trim()) || d.baseName;
+  d.author = (meta.Author && String(meta.Author).trim()) || '';
+  const n = d.doc.numPages;
+  const longSide = n > 600 ? 300 : 400; // smaller maps for long documents
+  showProgress(true);
+  for (let i = 0; i < n; i++) {
+    if (!docs.includes(d)) throw new Error('removed');
+    d.progress = i / n;
+    setProgress(i / n, `${d.name}: analysing page ${i + 1} of ${n}`);
+    renderFileList();
+    d.pages.push(await analysePage(d.doc, i, longSide));
+  }
+}
+
+// Make `d` the document shown in the preview (and used by recompute/output).
+function activate(d, { preview = true } = {}) {
+  const prev = state.active;
+  if (prev && prev !== d && docs.includes(prev)) {
+    for (const k of DOC_FIELDS) prev[k] = state[k];
+    prev.title = els.title.value;
+    prev.author = els.author.value;
+  }
+  state.active = d;
+  for (const k of DOC_FIELDS) state[k] = d[k];
+  els.title.value = d.title;
+  els.author.value = d.author;
+  state.previewCache = null;
+  imageCache = null;
+  recompute(preview);
+  renderFileList();
+}
+
+function removeDoc(d) {
+  if (state.busy) return;
+  const i = docs.indexOf(d);
+  if (i < 0) return;
+  docs.splice(i, 1);
+  if (state.active === d) {
+    state.active = null;
+    const next = docs.find((x) => x.status === 'ready');
+    if (next) activate(next);
+    else {
+      els.workspace.hidden = true;
+      Object.assign(state, { bytes: null, doc: null, pages: [], overrides: {}, current: 0, crops: [] });
+    }
+  }
+  if (d.doc && d.status !== 'loading') d.doc.destroy();
+  if (!docs.length) {
+    els.drop.classList.remove('compact');
+    els.pick.textContent = 'Choose PDFs';
+    $('dropHint').textContent = 'or drop them here. You can pick several at once.';
+  }
+  renderFileList();
+}
+
+function renderFileList() {
+  const ul = $('fileList');
+  ul.hidden = !docs.length;
+  ul.replaceChildren(...docs.map((d) => {
+    const li = document.createElement('li');
+    if (d === state.active) li.classList.add('active');
+    if (d.status === 'error') li.classList.add('error');
+    const sel = document.createElement('button');
+    sel.type = 'button';
+    sel.className = 'file-sel';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = d.name;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = d.status === 'ready' ? `${d.pages.length} page${d.pages.length === 1 ? '' : 's'}`
+      : d.status === 'loading' ? `Analysing ${Math.round(d.progress * 100)}%`
+      : d.status === 'queued' ? 'Waiting…' : 'Could not open';
+    if (d.status === 'error') sel.title = d.error;
+    sel.append(name, meta);
+    sel.disabled = d.status !== 'ready' || state.busy;
+    sel.setAttribute('aria-current', d === state.active ? 'true' : 'false');
+    sel.addEventListener('click', () => { if (d !== state.active && !state.busy) activate(d); });
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'file-rm';
+    rm.textContent = '×';
+    rm.setAttribute('aria-label', `Remove ${d.name}`);
+    rm.disabled = state.busy;
+    rm.addEventListener('click', () => removeDoc(d));
+    li.append(sel, rm);
+    return li;
+  }));
+  const ready = docs.filter((d) => d.status === 'ready').length;
+  els.allWrap.hidden = ready < 2;
+  els.allCount.textContent = ready;
+  updateMainLabel();
+}
+
+const batchMode = () => !els.allWrap.hidden && els.allFiles.checked;
+function updateMainLabel() {
+  const n = docs.filter((d) => d.status === 'ready').length;
+  els.mainLabel.textContent = batchMode() ? `Download all ${n} for Kobo` : 'Download for Kobo';
+  els.mainSub.textContent = batchMode() ? '.zip of .kepub.epub files' : '.kepub.epub';
+}
+els.allFiles.addEventListener('change', updateMainLabel);
+
+function updateButtons() {
+  const off = state.busy || state.loading;
+  document.querySelectorAll('button[data-fmt]').forEach((b) => (b.disabled = off));
 }
 
 // Render a page small and store how far each pixel is from the page's
 // background tone (median luminance). Works for white, cream or dark pages.
-async function analysePage(index, longSide) {
-  const page = await state.doc.getPage(index + 1);
+async function analysePage(pdf, index, longSide) {
+  const page = await pdf.getPage(index + 1);
   const vp1 = page.getViewport({ scale: 1 });
   const scale = longSide / Math.max(vp1.width, vp1.height);
   const vp = page.getViewport({ scale });
@@ -216,7 +349,7 @@ function groupOf(i, s) {
   return `${s.mode === 'oddeven' ? i % 2 : 0}:${Math.round(p.w / 4)}x${Math.round(p.h / 4)}`;
 }
 
-function recompute() {
+function recompute(preview = true) {
   const s = settings();
   const n = state.pages.length;
   state.boxes = new Array(n);
@@ -266,12 +399,12 @@ function recompute() {
     const px = padPts / p.w, py = padPts / p.h;
     return { l: Math.max(0, c.l - px), t: Math.max(0, c.t - py), r: Math.min(1, c.r + px), b: Math.min(1, c.b + py) };
   });
-  applyOverrides();
+  applyOverrides(preview);
 }
 
-function applyOverrides() {
+function applyOverrides(preview = true) {
   state.crops = state.auto.map((a, i) => state.overrides[i] || a);
-  drawPreview();
+  if (preview) drawPreview();
 }
 
 // ---------------------------------------------------------------- preview
@@ -406,7 +539,7 @@ for (const [inp, out] of [['padding', 'paddingOut'], ['sens', 'sensOut'], ['edge
   els[inp].addEventListener('input', () => { $(out).textContent = els[inp].value; });
 }
 let rcTimer = 0;
-const scheduleRecompute = () => { clearTimeout(rcTimer); rcTimer = setTimeout(() => state.pages.length && recompute(), 60); };
+const scheduleRecompute = () => { clearTimeout(rcTimer); rcTimer = setTimeout(() => state.active && !state.busy && recompute(), 60); };
 for (const id of ['mode', 'padding', 'sens', 'edge', 'skipFull', 'ignoreHF']) {
   els[id].addEventListener('input', scheduleRecompute);
   els[id].addEventListener('change', scheduleRecompute);
@@ -668,40 +801,71 @@ function download(blob, name) {
 const safeName = () => (els.title.value.trim() || state.baseName).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120);
 
 let imageCache = null; // { key, images } so EPUB/KEPUB/CBZ don't re-render each time
+let statusPrefix = '';
+const FMT_NAMES = { kepub: 'Kobo', epub: 'EPUB', cbz: 'CBZ', pdf: 'PDF' };
+
+// Build one output file for the active document.
+async function makeOutput(fmt) {
+  const s = settings();
+  if (fmt === 'pdf') return { blob: await buildCroppedPdf(), name: `${safeName()} (cropped).pdf` };
+  const key = JSON.stringify([state.active?.id, s.devW, s.devH, s.gray, s.quality, state.crops]);
+  if (!imageCache || imageCache.key !== key) imageCache = { key, images: await renderAllImages(s) };
+  const images = imageCache.images;
+  if (fmt === 'cbz') return { blob: await buildCbz(images), name: `${safeName()}.cbz` };
+  return { blob: await buildEpub(s, images), name: `${safeName()}${fmt === 'kepub' ? '.kepub' : ''}.epub` };
+}
 
 async function generate(fmt) {
-  if (state.busy || !state.pages.length) return;
+  if (state.busy || state.loading || !state.active) return;
   state.busy = true;
-  const buttons = document.querySelectorAll('button[data-fmt]');
-  buttons.forEach((b) => (b.disabled = true));
+  updateButtons();
+  renderFileList();
   showProgress(true);
   try {
-    const s = settings();
-    if (fmt === 'pdf') {
-      download(await buildCroppedPdf(), `${safeName()} (cropped).pdf`);
+    const ready = docs.filter((d) => d.status === 'ready');
+    if (!batchMode() || ready.length < 2) {
+      const o = await makeOutput(fmt);
+      download(o.blob, o.name);
     } else {
-      const key = JSON.stringify([s.devW, s.devH, s.gray, s.quality, state.crops]);
-      if (!imageCache || imageCache.key !== key) imageCache = { key, images: await renderAllImages(s) };
-      const images = imageCache.images;
-      if (fmt === 'cbz') download(await buildCbz(images), `${safeName()}.cbz`);
-      else download(await buildEpub(s, images), `${safeName()}${fmt === 'kepub' ? '.kepub' : ''}.epub`);
+      const original = state.active;
+      const zip = new JSZip();
+      const used = new Set();
+      try {
+        for (const [k, d] of ready.entries()) {
+          activate(d, { preview: false });
+          statusPrefix = `File ${k + 1} of ${ready.length} · `;
+          const o = await makeOutput(fmt);
+          let name = o.name;
+          for (let n = 2; used.has(name.toLowerCase()); n++) name = o.name.replace(/(\.kepub\.epub|\.[a-z]+)$/i, ` (${n})$1`);
+          used.add(name.toLowerCase());
+          zip.file(name, o.blob, { compression: 'STORE' });
+          imageCache = null; // free memory between files
+        }
+      } finally {
+        statusPrefix = '';
+        activate(original);
+      }
+      const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip' },
+        (m) => setProgress(m.percent / 100, 'Zipping…'));
+      download(blob, `PDF Cut - ${ready.length} files (${FMT_NAMES[fmt]}).zip`);
     }
     setProgress(1, 'Done. Check your downloads.');
-    setTimeout(() => showProgress(false), 2500);
+    setTimeout(() => { if (!state.busy && !state.loading) showProgress(false); }, 2500);
   } catch (err) {
     console.error(err);
     setProgress(0, `Failed: ${err.message || err}`);
     setTimeout(() => showProgress(false), 6000);
   } finally {
     state.busy = false;
-    buttons.forEach((b) => (b.disabled = false));
+    updateButtons();
+    renderFileList();
   }
 }
 
 document.querySelectorAll('button[data-fmt]').forEach((b) => b.addEventListener('click', () => generate(b.dataset.fmt)));
 
 function showProgress(on) { els.progress.hidden = !on; if (on) setProgress(0, ''); }
-function setProgress(frac, text) { els.bar.value = Math.max(0, Math.min(1, frac)); els.status.textContent = text; }
+function setProgress(frac, text) { els.bar.value = Math.max(0, Math.min(1, frac)); els.status.textContent = text ? statusPrefix + text : ''; }
 
 // Expose for automated tests.
-window.__pdfcut = { state, settings, recompute, generate };
+window.__pdfcut = { state, docs, settings, recompute, generate };

@@ -20,10 +20,13 @@
 
   <main>
     <section id="drop" class="drop">
-      <input type="file" id="file" accept="application/pdf,.pdf" hidden>
-      <button type="button" id="pick" class="primary big">Choose a PDF</button>
-      <p class="muted small" id="dropHint">or drop one here</p>
+      <input type="file" id="file" accept="application/pdf,.pdf" multiple hidden>
+      <div class="drop-top">
+        <button type="button" id="pick" class="primary big">Choose PDFs</button>
+        <p class="muted small" id="dropHint">or drop them here. You can pick several at once.</p>
+      </div>
       <p class="small" id="fileinfo"></p>
+      <ul id="fileList" hidden></ul>
     </section>
 
     <div id="workspace" hidden>
@@ -71,9 +74,10 @@
             <label>Width <input type="number" id="cw" value="1264" min="200" max="4000" inputmode="numeric"></label>
             <label>Height <input type="number" id="ch" value="1680" min="200" max="4000" inputmode="numeric"></label>
           </div>
+          <label class="check" id="allWrap" hidden><input type="checkbox" id="allFiles" checked> All <span id="allCount">2</span> files (one .zip)</label>
           <button type="button" class="primary big wide dl" data-fmt="kepub">
-            <span class="dl-main"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>Download for Kobo</span>
-            <span class="dl-sub">.kepub.epub</span>
+            <span class="dl-main"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg><span id="mainLabel">Download for Kobo</span></span>
+            <span class="dl-sub" id="mainSub">.kepub.epub</span>
           </button>
           <p class="small muted or">Other formats</p>
           <div class="formats">
@@ -117,8 +121,8 @@
           <label>Image quality <output id="qualOut">80</output>
             <input type="range" id="qual" min="40" max="95" step="5" value="80">
           </label>
-          <label>Title <input type="text" id="title"></label>
-          <label>Author <input type="text" id="author"></label>
+          <label>Title (this file) <input type="text" id="title"></label>
+          <label>Author (this file) <input type="text" id="author"></label>
           <button type="button" id="resetAll" class="wide">Reset all manual crops</button>
         </details>
       </div>
